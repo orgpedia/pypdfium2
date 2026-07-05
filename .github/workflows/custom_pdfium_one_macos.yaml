@@ -1,0 +1,247 @@
+# SPDX-FileCopyrightText: 2026 geisserml <geisserml@gmail.com>
+# SPDX-License-Identifier: Apache-2.0 OR BSD-3-Clause
+
+name: Custom PDFium One macOS
+
+on:
+  workflow_dispatch:
+    inputs:
+      pdfium_repo:
+        description: Owner/repo for the custom PDFium build
+        type: string
+        required: true
+        default: mukundesh/pdfium
+      pdfium_artifact:
+        description: Artifact name produced by the PDFium workflow
+        type: string
+        required: true
+        default: pdfium-macos-arm64
+      pdfium_ver:
+        description: PDFium build version (e.g. 7913)
+        type: string
+        required: true
+        default: "7913"
+      py_ver:
+        description: Python version
+        type: string
+        required: true
+        default: "3.12"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ inputs.py_ver }}
+
+      - name: Check out pypdfium2 repository
+        uses: actions/checkout@v5
+
+      - name: Install Python build dependencies
+        run: |
+          python3 -m pip install -U pip
+          python3 -m pip install -U -r req/setup.txt -r req/test.txt build
+
+      - name: Download custom PDFium artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh run download \
+            --repo "${{ inputs.pdfium_repo }}" \
+            --name "${{ inputs.pdfium_artifact }}" \
+            --dir custom_pdfium_artifact
+
+      - name: Inspect custom PDFium artifact
+        run: |
+          echo "== custom_pdfium_artifact tree =="
+          find custom_pdfium_artifact -maxdepth 3 -type f | sort
+
+      - name: Resolve PDFium paths
+        run: |
+          PDFIUM_LIB="$(find custom_pdfium_artifact/lib -maxdepth 1 -type f \( -name 'libpdfium*.dylib' -o -name 'libpdfium*.so' -o -name 'libpdfium*.dll' \) | head -n 1)"
+          test -n "$PDFIUM_LIB"
+          test -d custom_pdfium_artifact/include/public
+          echo "Resolved PDFIUM_LIB=$PDFIUM_LIB"
+          echo "Resolved PDFIUM_HEADERS=$PWD/custom_pdfium_artifact/include/public"
+          echo "PDFIUM_BINARY=$PDFIUM_LIB" >> "$GITHUB_ENV"
+          echo "PDFIUM_HEADERS=$PWD/custom_pdfium_artifact/include/public" >> "$GITHUB_ENV"
+
+      - name: Stage custom PDFium as sourcebuild
+        run: |
+          python3 - <<'PY'
+          import os
+          import sys
+          import shutil
+          from pathlib import Path
+          sys.path.insert(0, str(Path("setupsrc").resolve()))
+          from _build_helpers import pack_sourcebuild
+          from base import PdfiumVer
+
+          pdfium_ver_str = os.environ.get("PDFIUM_VER", "7913")
+          try:
+              full_ver = PdfiumVer.to_full(pdfium_ver_str)
+          except Exception:
+              full_ver = PdfiumVer.scheme(120, 0, int(pdfium_ver_str), 0)
+
+          pdfium_dir = Path("custom_pdfium_artifact/include").resolve()
+          build_dir = Path("custom_pdfium_artifact/lib").resolve()
+          print(f"pdfium_dir={pdfium_dir}")
+          print(f"build_dir={build_dir}")
+          pack_sourcebuild(
+              pdfium_dir=pdfium_dir,
+              build_dir=build_dir,
+              sub_target="custom",
+              full_ver=full_ver,
+              build_ver=pdfium_ver_str,
+              post_ver=dict(n_commits=0, hash=None),
+              load_lib=False,
+          )
+          sourcebuild_dir = Path("data/sourcebuild").resolve()
+          print("== copying runtime libraries into sourcebuild staging ==")
+          for lib_path in build_dir.iterdir():
+              if lib_path.suffix in {".dylib", ".so", ".dll"}:
+                  print(f"copy {lib_path.name}")
+                  shutil.copy2(lib_path, sourcebuild_dir / lib_path.name)
+          version_file = sourcebuild_dir / "version.json"
+          print("== staged version metadata ==")
+          print(version_file.read_text())
+          print("== staged runtime libraries ==")
+          for lib_path in sorted(sourcebuild_dir.iterdir()):
+              if lib_path.suffix in {".dylib", ".so", ".dll"}:
+                  print(lib_path.name)
+          PY
+        env:
+          PDFIUM_BINARY: ${{ env.PDFIUM_BINARY }}
+          PDFIUM_HEADERS: ${{ env.PDFIUM_HEADERS }}
+          PDFIUM_VER: ${{ inputs.pdfium_ver }}
+
+      - name: Inspect sourcebuild staging
+        run: |
+          echo "== data/sourcebuild =="
+          find data/sourcebuild -maxdepth 2 -type f | sort
+          echo "== src/pypdfium2_raw before build =="
+          find src/pypdfium2_raw -maxdepth 2 -type f | sort || true
+
+      - name: Build wheel against custom PDFium
+        run: |
+          python3 -m build -wxn
+        env:
+          PDFIUM_PLATFORM: sourcebuild
+
+      - name: Inspect dist contents
+        run: |
+          echo "== dist =="
+          ls -lah dist
+          WHEEL_PATH="$(ls dist/*.whl | head -n 1)"
+          echo "Wheel: $WHEEL_PATH"
+          python3 - <<'PY'
+          import sys
+          import zipfile
+          from pathlib import Path
+          wheel = sorted(Path("dist").glob("*.whl"))[0]
+          print("== wheel members matching pypdfium2_raw ==")
+          with zipfile.ZipFile(wheel) as zf:
+              for name in sorted(zf.namelist()):
+                  if "pypdfium2_raw/" in name:
+                      print(name)
+          PY
+
+      - name: Upload wheel as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          path: ./dist/*.whl
+          name: custom-pypdfium2-macos-arm64
+          if-no-files-found: error
+
+      - name: Install and smoke test wheel
+        run: |
+          python3 -m pip install ./dist/*.whl
+          echo "== installed pypdfium2_raw files without importing package =="
+          python3 - <<'PY'
+          import site
+          from pathlib import Path
+          candidates = []
+          for base in site.getsitepackages():
+              raw_dir = Path(base) / "pypdfium2_raw"
+              if raw_dir.is_dir():
+                  candidates.append(raw_dir)
+          assert candidates, "Could not locate installed pypdfium2_raw package directory"
+          raw_dir = candidates[0]
+          print("raw_dir =", raw_dir)
+          for path in sorted(raw_dir.iterdir()):
+              print(path.name)
+          PY
+          echo "== runtime dylib dependencies =="
+          python3 - <<'PY'
+          import site
+          from pathlib import Path
+          candidates = []
+          for base in site.getsitepackages():
+              raw_dir = Path(base) / "pypdfium2_raw"
+              if raw_dir.is_dir():
+                  candidates.append(raw_dir)
+          assert candidates, "Could not locate installed pypdfium2_raw package directory"
+          raw_dir = candidates[0]
+          dylib = raw_dir / "libpdfium.dylib"
+          print(dylib)
+          PY
+          otool -L "$(python3 - <<'PY'
+          import site
+          from pathlib import Path
+          candidates = []
+          for base in site.getsitepackages():
+              raw_dir = Path(base) / "pypdfium2_raw"
+              if raw_dir.is_dir():
+                  candidates.append(raw_dir)
+          assert candidates, "Could not locate installed pypdfium2_raw package directory"
+          raw_dir = candidates[0]
+          print(raw_dir / "libpdfium.dylib")
+          PY
+          )" || true
+          python3 - <<'PY'
+          import pypdfium2 as pdfium
+          print(pdfium.PDFIUM_INFO)
+          print(hasattr(pdfium, "PdfDocument"))
+          PY
+          echo "== text item API smoke test =="
+          python3 - <<'PY'
+          import pypdfium2 as pdfium
+          from pathlib import Path
+
+          pdf = pdfium.PdfDocument(Path("tests/resources/text.pdf"))
+          page = pdf[0]
+          textpage = page.get_textpage()
+
+          n_chars = textpage.count_chars()
+          n_items = textpage.count_items()
+          print(f"count_chars={n_chars}")
+          print(f"count_items={n_items}")
+          assert n_items == n_chars
+
+          item0 = textpage.get_item(0)
+          print(f"item0={item0}")
+          assert item0.unicode == ord("L")
+          assert item0.font_name == "Ubuntu"
+          assert item0.font_obj_num > 0
+
+          newline_item = textpage.get_item(27)
+          print(f"newline_item={newline_item}")
+          assert newline_item.unicode == ord("\r")
+          assert newline_item.is_generated is True
+
+          items = list(textpage.iter_items())
+          print(f"iter_items_count={len(items)}")
+          assert len(items) == n_items
+          assert items[0] == item0
+          PY
+
+      - name: Run test suite against installed wheel
+        run: |
+          python3 -m pytest tests/
