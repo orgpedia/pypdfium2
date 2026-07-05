@@ -4,6 +4,9 @@
 name: Custom PDFium One macOS
 
 on:
+  push:
+    branches:
+      - cid-api
   workflow_dispatch:
     inputs:
       pdfium_repo:
