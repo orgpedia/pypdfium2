@@ -277,6 +277,33 @@ class PdfFont (pdfium_i.AutoCloseable):
             raise PdfiumError("Failed to get font weight.")
         return weight
     
+    def get_obj_num(self):
+        """
+        Returns:
+            int: The PDF indirect object number of the font.
+        """
+        return pdfium_c.FPDFFont_GetObjNum(self)
+        
+    def get_data(self):
+        """
+        Extract the raw embedded font data program bytes.
+        
+        Returns:
+            bytes: The raw font bytes, or None if no embedded data is available.
+        """
+        n_bytes = ctypes.c_size_t()
+        # Query required buffer size
+        ok = pdfium_c.FPDFFont_GetFontData(self, None, 0, ctypes.byref(n_bytes))
+        if not ok or n_bytes.value == 0:
+            return None
+            
+        buffer = (ctypes.c_uint8 * n_bytes.value)()
+        out_buflen = ctypes.c_size_t()
+        ok = pdfium_c.FPDFFont_GetFontData(self, buffer, n_bytes.value, ctypes.byref(out_buflen))
+        if not ok:
+            raise PdfiumError("Failed to extract font data.")
+        return bytes(buffer)
+    
     STANDARD_FONTS = ("Times-Roman", "Times-Bold", "Times-Italic", "Times-BoldItalic", "Helvetica", "Helvetica-Bold", "Helvetica-Oblique", "Helvetica-BoldOblique", "Courier", "Courier-Bold", "Courier-Oblique", "Courier-BoldOblique", "Symbol", "ZapfDingbats")
     """
     Standard 14 fonts (Type 1, PostScript names) according to PDF32000_2008, section 9.6.2.2.

@@ -70,6 +70,39 @@ def test_getrectboxes(textpage):
     assert textpage.get_text_range(textpage.count_chars()-len(text))  # count=-1
 
 
+def test_get_items(textpage):
+    n_items = textpage.count_items()
+    assert n_items == textpage.count_chars()
+
+    item0 = textpage.get_item(0)
+    assert isinstance(item0, pdfium.PdfTextItem)
+    assert item0.unicode == ord("L")
+    assert item0.char_code == 1
+    assert isinstance(item0.glyph_id, int)
+    assert item0.glyph_id >= 0
+    assert item0.font_name == "Ubuntu"
+    assert item0.font_size == 16.0
+    assert item0.font_obj_num > 0
+    assert item0.font_weight == 400
+    assert item0.font_type in (
+        pdfium_c.FPDF_TEXT_ITEM_FONT_TRUETYPE,
+        pdfium_c.FPDF_TEXT_ITEM_FONT_CIDTYPE2,
+    )
+    assert item0.is_generated is False
+    assert item0.bbox == textpage.get_charbox(0)
+    assert item0.loose_bbox == textpage.get_charbox(0, loose=True)
+
+    newline_item = textpage.get_item(27)
+    assert newline_item.unicode == ord("\r")
+    assert newline_item.is_generated is True
+    assert newline_item.font_name is None
+    assert newline_item.font_obj_num == 0
+
+    items = list(textpage.iter_items())
+    assert len(items) == n_items
+    assert items[0] == item0
+
+
 def _get_rects(textpage, search_result):
     # TODO add helper?
     if search_result is None:
@@ -190,6 +223,11 @@ def test_font_helpers(index, exp_char, text, font_size, base_name, family_name, 
         assert fontobj.get_family_name() == family_name
         assert fontobj.get_weight() == weight
         assert fontobj.is_embedded is True
+        assert fontobj.get_obj_num() > 0
+        
+        font_data = fontobj.get_data()
+        assert font_data is not None
+        assert len(font_data) > 0
 
 
 def _ttfmap_get(charset):

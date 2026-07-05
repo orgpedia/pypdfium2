@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 geisserml <geisserml@gmail.com>
 # SPDX-License-Identifier: Apache-2.0 OR BSD-3-Clause
 
-__all__ = ("PdfTextPage", "PdfTextSearcher")
+__all__ = ("PdfTextItem", "PdfTextPage", "PdfTextSearcher")
 
 import ctypes
 import logging
 from codecs import decode
+from dataclasses import dataclass
 import pypdfium2.raw as pdfium_c
 import pypdfium2.internal as pdfium_i
 from pypdfium2._helpers.misc import PdfiumError
@@ -14,6 +15,23 @@ from pypdfium2._lazy import cached_property
 
 c_double = ctypes.c_double
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class PdfTextItem:
+    char_code: int
+    glyph_id: int
+    bbox: tuple[float, float, float, float]
+    loose_bbox: tuple[float, float, float, float]
+    origin: tuple[float, float]
+    font_size: float
+    font_obj_num: int
+    font_flags: int
+    font_weight: int
+    font_type: int
+    is_generated: bool
+    unicode: int
+    font_name: str | None
 
 
 class PdfTextPage (pdfium_i.AutoCloseable):
@@ -155,6 +173,72 @@ class PdfTextPage (pdfium_i.AutoCloseable):
         if n_chars == -1:
             raise PdfiumError("Failed to get character count.")
         return n_chars
+
+
+    def count_items(self):
+        """
+        Returns:
+            int: The number of text items on the text page.
+        """
+        n_items = pdfium_c.FPDFText_CountItems(self)
+        if n_items == -1:
+            raise PdfiumError("Failed to get text item count.")
+        return n_items
+
+
+    def _get_item_font_name(self, index, errors="replace"):
+        bufsize = pdfium_c.FPDFText_GetItemFontName(self, index, None, 0)
+        if bufsize == 0:
+            return None
+
+        buffer = ctypes.create_string_buffer(bufsize)
+        pdfium_c.FPDFText_GetItemFontName(self, index, buffer, bufsize)
+        return decode(memoryview(buffer)[:bufsize-1], "utf-8", errors=errors)
+
+
+    def get_item(self, index, errors="replace"):
+        """
+        Get source code, geometry, and font metadata for a single text item.
+
+        Parameters:
+            index (int):
+                Index of the item to retrieve.
+            errors (str):
+                Error treatment when decoding the font name (see :func:`codecs.decode`).
+        Returns:
+            PdfTextItem: The requested text item.
+        """
+
+        raw_item = pdfium_c.FPDF_TEXT_ITEM()
+        ok = pdfium_c.FPDFText_GetItemInfo(self, index, ctypes.byref(raw_item))
+        if not ok:
+            raise PdfiumError("Failed to get text item.")
+
+        font_name = self._get_item_font_name(index, errors=errors)
+        return PdfTextItem(
+            char_code = raw_item.char_code,
+            glyph_id = raw_item.glyph_id,
+            bbox = (raw_item.left, raw_item.bottom, raw_item.right, raw_item.top),
+            loose_bbox = (raw_item.loose_left, raw_item.loose_bottom, raw_item.loose_right, raw_item.loose_top),
+            origin = (raw_item.origin_x, raw_item.origin_y),
+            font_size = raw_item.font_size,
+            font_obj_num = raw_item.font_obj_num,
+            font_flags = raw_item.font_flags,
+            font_weight = raw_item.font_weight,
+            font_type = raw_item.font_type,
+            is_generated = bool(raw_item.is_generated),
+            unicode = raw_item.unicode if raw_item.has_unicode else 0,
+            font_name = font_name,
+        )
+
+
+    def iter_items(self, errors="replace"):
+        """
+        Yields:
+            PdfTextItem: Each text item on the page in PDFium's internal order.
+        """
+        for index in range(self.count_items()):
+            yield self.get_item(index, errors=errors)
     
     
     def count_rects(self, index=0, count=-1):
