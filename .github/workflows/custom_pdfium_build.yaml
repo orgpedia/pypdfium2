@@ -1,0 +1,204 @@
+name: Custom PDFium Packaging
+
+on:
+  push:
+    branches:
+      - cid-api
+  workflow_dispatch:
+    inputs:
+      pdfium_repo:
+        description: Owner/repo for the custom PDFium build
+        type: string
+        required: true
+        default: orgpedia/pdfium
+      pdfium_ver:
+        description: PDFium build version (e.g. 7913)
+        type: string
+        required: true
+        default: "7913"
+      py_ver:
+        description: Python version
+        type: string
+        required: true
+        default: "3.12"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-wheels:
+    name: Build wheel for ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    env:
+      PIP_BREAK_SYSTEM_PACKAGES: 1
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            platform: macos-arm64
+            artifact: pdfium-macos-arm64
+          - os: macos-13
+            platform: macos-x64
+            artifact: pdfium-macos-x64
+          - os: ubuntu-24.04
+            platform: linux-x64
+            artifact: pdfium-linux-x64
+          - os: windows-2022
+            platform: windows-x64
+            artifact: pdfium-windows-x64
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ inputs.py_ver || '3.12' }}
+
+      - name: Check out pypdfium2 repository
+        uses: actions/checkout@v5
+
+      - name: Install Python build dependencies
+        run: |
+          python -m pip install -U pip
+          python -m pip install -U -r req/setup.txt -r req/test.txt build
+
+      - name: Download custom PDFium artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh run download \
+            --repo "${{ inputs.pdfium_repo || 'orgpedia/pdfium' }}" \
+            --name "${{ matrix.artifact }}" \
+            --dir custom_pdfium_artifact
+
+      - name: Inspect custom PDFium artifact
+        run: |
+          python -c "
+          from pathlib import Path
+          p = Path('custom_pdfium_artifact')
+          print('== custom_pdfium_artifact tree ==')
+          for f in sorted(p.rglob('*')):
+              if f.is_file():
+                  print(f.relative_to(p))
+          "
+
+      - name: Resolve PDFium paths
+        run: |
+          python -c "
+          import os
+          from pathlib import Path
+          p = Path('custom_pdfium_artifact')
+          libs = [f for f in p.rglob('*') if f.is_file() and f.suffix in ('.dylib', '.so', '.dll')]
+          assert libs, 'No pdfium dynamic library found'
+          lib = libs[0]
+          headers = p / 'include' / 'public'
+          assert headers.is_dir(), f'Headers directory not found: {headers}'
+          
+          # Write to github env
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write(f'PDFIUM_BINARY={lib.resolve()}\n')
+              f.write(f'PDFIUM_HEADERS={headers.resolve()}\n')
+          print(f'Resolved PDFIUM_BINARY={lib.resolve()}')
+          print(f'Resolved PDFIUM_HEADERS={headers.resolve()}')
+          "
+
+      - name: Stage custom PDFium as sourcebuild
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+          import shutil
+          from pathlib import Path
+          sys.path.insert(0, str(Path("setupsrc").resolve()))
+          from _build_helpers import pack_sourcebuild
+          from base import PdfiumVer
+
+          pdfium_ver_str = os.environ.get("PDFIUM_VER", "7913")
+          try:
+              full_ver = PdfiumVer.to_full(pdfium_ver_str)
+          except Exception:
+              full_ver = PdfiumVer.scheme(120, 0, int(pdfium_ver_str), 0)
+
+          pdfium_dir = Path("custom_pdfium_artifact/include").resolve()
+          build_dir = Path("custom_pdfium_artifact/lib").resolve()
+          print(f"pdfium_dir={pdfium_dir}")
+          print(f"build_dir={build_dir}")
+          pack_sourcebuild(
+              pdfium_dir=pdfium_dir,
+              build_dir=build_dir,
+              sub_target="custom",
+              full_ver=full_ver,
+              build_ver=pdfium_ver_str,
+              post_ver=dict(n_commits=0, hash=None),
+              load_lib=False,
+          )
+          sourcebuild_dir = Path("data/sourcebuild").resolve()
+          print("== copying runtime libraries into sourcebuild staging ==")
+          for lib_path in build_dir.iterdir():
+              if lib_path.suffix in {".dylib", ".so", ".dll"}:
+                  print(f"copy {lib_path.name}")
+                  shutil.copy2(lib_path, sourcebuild_dir / lib_path.name)
+          version_file = sourcebuild_dir / "version.json"
+          print("== staged version metadata ==")
+          print(version_file.read_text())
+          print("== staged runtime libraries ==")
+          for lib_path in sorted(sourcebuild_dir.iterdir()):
+              if lib_path.suffix in {".dylib", ".so", ".dll"}:
+                  print(lib_path.name)
+          PY
+        env:
+          PDFIUM_BINARY: ${{ env.PDFIUM_BINARY }}
+          PDFIUM_HEADERS: ${{ env.PDFIUM_HEADERS }}
+          PDFIUM_VER: ${{ inputs.pdfium_ver || '7913' }}
+
+      - name: Inspect sourcebuild staging
+        run: |
+          python -c "
+          from pathlib import Path
+          print('== data/sourcebuild ==')
+          for f in sorted(Path('data/sourcebuild').glob('*')):
+              print(f.name)
+          print('== src/pypdfium2_raw before build ==')
+          for f in sorted(Path('src/pypdfium2_raw').glob('*')):
+              print(f.name)
+          "
+
+      - name: Build wheel against custom PDFium
+        run: |
+          python -m build -wxn
+        env:
+          PDFIUM_PLATFORM: sourcebuild
+
+      - name: Inspect dist contents
+        run: |
+          python - <<'PY'
+          import sys
+          import zipfile
+          from pathlib import Path
+          dist_dir = Path("dist")
+          for f in sorted(dist_dir.glob("*.whl")):
+              print(f"Wheel: {f.name} ({f.stat().st_size} bytes)")
+              with zipfile.ZipFile(f) as zf:
+                  print("== wheel members matching pypdfium2_raw ==")
+                  for name in sorted(zf.namelist()):
+                      if "pypdfium2_raw/" in name:
+                          print(name)
+          PY
+
+      - name: Upload wheel as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          path: ./dist/*.whl
+          name: custom-pypdfium2-${{ matrix.platform }}
+          if-no-files-found: error
+
+      - name: Install and run test suite against wheel
+        run: |
+          python -c "
+          import subprocess, sys, glob
+          whl = glob.glob('dist/*.whl')[0]
+          subprocess.run([sys.executable, '-m', 'pip', 'install', whl], check=True)
+          "
+          python -m pytest tests/
