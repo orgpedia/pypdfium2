@@ -10,7 +10,7 @@ on:
         description: Owner/repo for the custom PDFium build
         type: string
         required: true
-        default: mukundesh/pdfium
+        default: orgpedia/pdfium
       pdfium_artifact:
         description: Artifact name produced by the PDFium workflow
         type: string
