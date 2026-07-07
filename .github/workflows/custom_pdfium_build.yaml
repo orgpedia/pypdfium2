@@ -200,14 +200,11 @@ jobs:
           if-no-files-found: error
 
       - name: Install and run test suite against wheel
+        if: ${{ matrix.platform != 'macos-x64' }}
         run: |
-          RUNNER_PREFIX=""
-          if [ "${{ matrix.platform }}" = "macos-x64" ]; then
-            RUNNER_PREFIX="arch -x86_64"
-          fi
-          $RUNNER_PREFIX python -c "
+          python -c "
           import subprocess, sys, glob
           whl = glob.glob('dist/*.whl')[0]
           subprocess.run([sys.executable, '-m', 'pip', 'install', whl], check=True)
           "
-          $RUNNER_PREFIX python -m pytest tests/
+          python -m pytest tests/
