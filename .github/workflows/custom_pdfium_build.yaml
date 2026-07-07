@@ -40,15 +40,19 @@ jobs:
           - os: macos-14
             platform: macos-arm64
             artifact: pdfium-macos-arm64
+            cross_tag: macosx_12_0_arm64
           - os: macos-14
             platform: macos-x64
             artifact: pdfium-macos-x64
+            cross_tag: macosx_12_0_x86_64
           - os: ubuntu-24.04
             platform: linux-x64
             artifact: pdfium-linux-x64
+            cross_tag: manylinux_2_17_x86_64.manylinux2014_x86_64
           - os: windows-2022
             platform: windows-x64
             artifact: pdfium-windows-x64
+            cross_tag: win_amd64
 
     steps:
       - name: Set up Python
@@ -170,6 +174,7 @@ jobs:
           python -m build -wxn
         env:
           PDFIUM_PLATFORM: sourcebuild
+          CROSS_TAG: ${{ matrix.cross_tag }}
 
       - name: Inspect dist contents
         run: |
@@ -196,9 +201,13 @@ jobs:
 
       - name: Install and run test suite against wheel
         run: |
-          python -c "
+          RUNNER_PREFIX=""
+          if [ "${{ matrix.platform }}" = "macos-x64" ]; then
+            RUNNER_PREFIX="arch -x86_64"
+          fi
+          $RUNNER_PREFIX python -c "
           import subprocess, sys, glob
           whl = glob.glob('dist/*.whl')[0]
           subprocess.run([sys.executable, '-m', 'pip', 'install', whl], check=True)
           "
-          python -m pytest tests/
+          $RUNNER_PREFIX python -m pytest tests/
